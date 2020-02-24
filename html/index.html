@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<script src="./spark-md5.min.js"></script>
+<body>
+<form action="javascript:" onsubmit="splitLoading('upload')">
+    <input type="file" name="file" id="file">
+    <input type="submit" value="提交">
+</form>
+</body>
+<script>
+    var fileMd5 = '';
+    var filename = '';
+    var fileSize = '';
+    var chunks = 0;
+    var lastModified = 0;
+    var fileType = '';
+    var checking = true;    // 默认检查中  不允许上传
+    var uploadedIdxs = [];  // 已经上传的索引部分
+    var filepath = '';  // 服务器文件的路径
+    var uploadedChunks = 0; // 已上传完
+
+    function splitLoading(eve) {
+        var blobSlice = File.prototype.slice || File.prototype.mozSlice || File.prototype.webkitSlice,
+            file = document.getElementById('file').files[0],
+            chunkSize = 2097152,                             // Read in chunks of 2MB
+            currentChunk = 0,
+            spark = new SparkMD5.ArrayBuffer(),
+            fileReader = new FileReader();
+        chunks = Math.ceil(file.size / chunkSize);
+        file.lastModified = 0;
+        // 文件信息可以直接用一个对象
+        filename = file.name;
+        fileSize = file.size;
+        lastModified = file.lastModified;
+        fileType = file.type;
+        if(eve === 'upload'){
+            if(filepath != ''){
+                alert("秒传成功"+filepath);
+                return;
+            }
+            fileReader.onload =loadForUploader;
+        }else{
+            fileMd5 = '';
+            checking = true;
+            uploadedIdxs = [];
+            filepath = '';
+            uploadedChunks = 0;
+            fileReader.onload =loadForMd5;
+        }
+        fileReader.onerror = function () {
+            console.warn('oops, something went wrong.');
+        };
+
+        function loadForMd5(e) {    // loading文件计算md5
+            spark.append(e.target.result);                   // Append array buffer
+            currentChunk++;
+            if (currentChunk < chunks) {
+                loadNext();
+            } else {
+                fileMd5 = spark.end();
+                fileFindInServer(fileMd5);  // 计算完哈希先查线上有没
+                console.info('computed hash', fileMd5);  // Compute hash
+            }
+        }
+        function loadForUploader(e) {   // 文件上传
+            currentChunk++;
+            if(uploadedIdxs.indexOf(currentChunk) == -1){   // 已经上传过的分片无需上传 断点续传
+                fileuploader(e.target.result,currentChunk,fileMd5,filename,fileSize,chunks,lastModified,fileType);
+            }
+            if (currentChunk < chunks) {
+                loadNext();
+            }
+        }
+        function loadNext() {
+            var start = currentChunk * chunkSize,
+                end = ((start + chunkSize) >= file.size) ? file.size : start + chunkSize;
+            fileReader.readAsArrayBuffer(blobSlice.call(file, start, end));
+        }
+        loadNext();
+    }
+    document.getElementById('file').addEventListener('change', splitLoading);
+
+    var xhr;
+    function fileuploader(fileObj,trunkIdx,fileMd5,filename,fileSize,chunks,lastModified,fileType) {
+        //计算分片md5
+        var s = new SparkMD5.ArrayBuffer();
+        s.append(fileObj);                   // Append array buffer
+        var pieceMd5 = s.end();
+
+        var blob = new Blob([fileObj]);
+        var form = new FormData(); // FormData 对象
+        form.append("file", blob); // 文件对象
+        form.append("index", trunkIdx); // 文件对象
+        form.append("fileMd5", fileMd5); // 文件对象
+        form.append("filename", filename); // 文件对象
+        form.append("fileSize", fileSize); // 文件对象
+        form.append("chunks", chunks); // 总片数
+        form.append("lastModified", lastModified); // 总片数
+        form.append("type", fileType); // 文件类型
+        form.append("pieceMd5", pieceMd5); // 分片md5
+        xhr = new XMLHttpRequest();  // XMLHttpRequest 对象
+        xhr.open("post", 'http://127.0.0.1:8080', true); //post方式，url为服务器请求地址，true 该参数规定请求是否异步处理。
+        xhr.onload = uploadComplete; //请求完成
+        xhr.onerror =  uploadFailed; //请求失败
+        xhr.send(form); //开始上传，发送form数据
+    }
+    //上传成功响应
+    function uploadComplete(evt) {
+        //服务断接收完文件返回的结果
+        uploadedChunks++;
+
+        console.log(evt);
+        var data = JSON.parse(evt.target.responseText);
+        if(data.Success == 1) {
+            console.log("上传成功！");
+            if(data.Data.filepath){ // 已有文件地址就无需上传了
+                filepath = data.Data.filepath;
+                console.log("文件合并成功！");
+            }
+        }else{
+            console.log("上传失败！");
+        }
+    }
+    //上传失败
+    function uploadFailed(evt) {
+        console.log("上传失败！后台");
+    }
+    //取消上传
+    function cancleUploadFile(){
+        xhr.abort();
+    }
+    function fileFindInServer(fileMd5) {
+        var form = new FormData(); // FormData 对象
+        form.append("type", fileType); // 文件类型
+
+        xhr = new XMLHttpRequest();  // XMLHttpRequest 对象
+        xhr.open("get", 'http://127.0.0.1:8080/find?fileMd5='+fileMd5, true); //post方式，url为服务器请求地址，true 该参数规定请求是否异步处理。
+        xhr.onload = function (evt) {
+            var data = JSON.parse(evt.target.responseText);
+            if(data.Code == 0){
+                filepath = data.Data.filepath;
+            }
+            if(data.Code == 301){
+                var obj = data.Data;
+                Object.keys(obj).forEach(function(key){
+                    uploadedIdxs.push(obj[key]);
+                });
+                console.log(uploadedIdxs)
+            }
+            console.log(data)
+            checking = false;   // 检查结束
+            alert("数据检查成功，可点击上传");
+        }; //请求完成
+        xhr.onerror =  uploadFailed; //请求失败
+        xhr.send(form); //开始上传，发送form数据
+    }
+</script>
+</html>
